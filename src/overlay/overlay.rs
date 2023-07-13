@@ -648,7 +648,7 @@ impl Overlay {
         if transfer.source != source {
             tracing::trace!(
                 overlay_id = %self.id,
-                broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                broadcast_id = %DisplayHash(&broadcast_id),
                 "same broadcast but parts from different sources"
             );
             return Ok(());
@@ -731,7 +731,7 @@ impl Overlay {
         if !self.create_broadcast(broadcast_id) {
             tracing::warn!(
                 overlay_id = %self.id,
-                broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                broadcast_id = %DisplayHash(&broadcast_id),
                 "trying to send duplicated broadcast"
             );
             return Default::default();
@@ -742,7 +742,7 @@ impl Overlay {
             if let Err(e) = compression::compress(&mut data) {
                 tracing::warn!(
                     overlay_id = %self.id,
-                    broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                    broadcast_id = %DisplayHash(&broadcast_id),
                     "failed to compress overlay broadcast: {e:?}"
                 );
             }
@@ -792,7 +792,7 @@ impl Overlay {
         if !self.create_broadcast(broadcast_id) {
             tracing::warn!(
                 overlay_id = %self.id,
-                broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                broadcast_id = %DisplayHash(&broadcast_id),
                 "trying to send duplicated broadcast",
             );
             return Default::default();
@@ -802,7 +802,7 @@ impl Overlay {
             if let Err(e) = compression::compress(&mut data) {
                 tracing::warn!(
                     overlay_id = %self.id,
-                    broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                    broadcast_id = %DisplayHash(&broadcast_id),
                     "failed to compress overlay FEC broadcast: {e:?}"
                 );
             }
@@ -848,7 +848,7 @@ impl Overlay {
                         Err(e) => {
                             tracing::warn!(
                                 overlay_id = %overlay.id,
-                                broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                                broadcast_id = %DisplayHash(&broadcast_id),
                                 "failed to send overlay broadcast: {e}"
                             );
                             break 'outer;
@@ -1004,7 +1004,7 @@ impl Overlay {
                     Err(e) => {
                         tracing::warn!(
                             overlay_id = %overlay.id,
-                            broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                            broadcast_id = %DisplayHash(&broadcast_id),
                             "error when receiving overlay broadcast: {e}"
                         );
                         break;
@@ -1021,7 +1021,7 @@ impl Overlay {
                     _ => {
                         tracing::error!(
                             overlay_id = %overlay.id,
-                            broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                            broadcast_id = %DisplayHash(&broadcast_id),
                             "incoming fec broadcast mismatch"
                         );
                     }
@@ -1050,7 +1050,7 @@ impl Overlay {
                         _ => {
                             tracing::error!(
                                 overlay_id = %overlay.id,
-                                broadcast_id = %DisplayBroadcastId(&broadcast_id),
+                                broadcast_id = %DisplayHash(&broadcast_id),
                                 "incoming fec broadcast mismatch"
                             );
                         }
@@ -1396,20 +1396,6 @@ pub type ReceivedPeersMap =
     FastHashMap<HashWrapper<everscale_crypto::tl::PublicKeyOwned>, proto::overlay::NodeOwned>;
 
 type BroadcastFecTx = mpsc::UnboundedSender<BroadcastFec>;
-
-#[derive(Copy, Clone)]
-pub struct DisplayBroadcastId<'a>(pub &'a BroadcastId);
-
-impl std::fmt::Display for DisplayBroadcastId<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut output = [0u8; 64];
-        hex::encode_to_slice(self.0, &mut output).ok();
-
-        // SAFETY: output is guaranteed to contain only [0-9a-f]
-        let output = unsafe { std::str::from_utf8_unchecked(&output) };
-        f.write_str(output)
-    }
-}
 
 type BroadcastId = [u8; 32];
 

@@ -78,7 +78,6 @@ impl TransfersCache {
             adnl: adnl.clone(),
             local_id: *local_id,
             peer_id: *peer_id,
-            parts_rx,
             transfer: incoming_transfer,
             transfer_id: outgoing_transfer_id,
         };
@@ -91,7 +90,7 @@ impl TransfersCache {
             let barrier = barrier.clone();
             async move {
                 incoming_context
-                    .receive(Some(outgoing_transfer_state))
+                    .receive(Some(outgoing_transfer_state), parts_rx)
                     .await;
                 *barrier.lock() = Some(incoming_context.transfer);
             }
@@ -107,7 +106,7 @@ impl TransfersCache {
         let result = match result {
             Ok((true, mut roundtrip)) => {
                 let mut start = Instant::now();
-                let mut updates = incoming_transfer_state.updates();
+                let mut updates = 0;
                 let mut timeout = self.query_options.compute_timeout(Some(roundtrip));
 
                 loop {
@@ -292,7 +291,6 @@ impl TransfersCache {
             adnl: adnl.clone(),
             local_id: *local_id,
             peer_id: *peer_id,
-            parts_rx,
             transfer: IncomingTransfer::new(transfer_id, self.max_answer_size),
             transfer_id,
         };
@@ -304,7 +302,7 @@ impl TransfersCache {
         let force_compression = self.force_compression;
         tokio::spawn(async move {
             // Wait until incoming query is received
-            incoming_context.receive(None).await;
+            incoming_context.receive(None, parts_rx).await;
             transfers.insert(transfer_id, RldpTransfer::Done);
 
             // Process query
@@ -349,16 +347,18 @@ struct IncomingContext {
     adnl: Arc<adnl::Node>,
     local_id: adnl::NodeIdShort,
     peer_id: adnl::NodeIdShort,
-    parts_rx: MessagePartsRx,
     transfer: IncomingTransfer,
     transfer_id: TransferId,
 }
 
 impl IncomingContext {
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn receive(&mut self, mut outgoing_transfer_state: Option<Arc<OutgoingTransferState>>) {
+    async fn receive(
+        &mut self,
+        mut outgoing_transfer_state: Option<Arc<OutgoingTransferState>>,
+        mut rx: MessagePartsRx,
+    ) {
         // For each incoming message part
-        while let Some(message) = self.parts_rx.recv().await {
+        while let Some(message) = rx.recv().await {
             // Trying to process its data
             match self.transfer.process_chunk(message) {
                 // If some data was successfully processed
@@ -394,10 +394,6 @@ impl IncomingContext {
                 _ => {}
             }
         }
-
-        // Close and clear parts channel
-        self.parts_rx.close();
-        while self.parts_rx.recv().await.is_some() {}
     }
 
     #[tracing::instrument(level = "debug", skip_all)]

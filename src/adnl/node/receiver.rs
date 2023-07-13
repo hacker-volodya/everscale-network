@@ -203,7 +203,7 @@ impl Node {
                         %local_id,
                         %peer_id,
                         total = total_size,
-                        transfer_id = %DisplayTransferId(&transfer_id),
+                        transfer_id = %DisplayHash(&transfer_id),
                         "started ADNL transfer"
                     );
 
@@ -221,7 +221,7 @@ impl Node {
 
                                 if incoming_transfers.remove(&transfer_id).is_some() {
                                     tracing::debug!(
-                                        transfer_id = %DisplayTransferId(&transfer_id),
+                                        transfer_id = %DisplayHash(&transfer_id),
                                         "ADNL transfer timed out"
                                     );
                                 }
@@ -519,7 +519,7 @@ impl Node {
         };
         let peer = peer.value();
 
-        match self.channels_by_peers.entry(*peer_id) {
+        let new_channel = match self.channels_by_peers.entry(*peer_id) {
             Entry::Occupied(mut entry) => {
                 let channel = entry.get();
 
@@ -551,8 +551,10 @@ impl Node {
                 );
                 self.channels_by_id.insert(
                     *new_channel.priority_channel_in_id(),
-                    ChannelReceiver::Priority(new_channel),
+                    ChannelReceiver::Priority(new_channel.clone()),
                 );
+
+                new_channel
             }
             Entry::Vacant(entry) => {
                 let new_channel = entry
@@ -571,12 +573,19 @@ impl Node {
                 );
                 self.channels_by_id.insert(
                     *new_channel.priority_channel_in_id(),
-                    ChannelReceiver::Priority(new_channel),
+                    ChannelReceiver::Priority(new_channel.clone()),
                 );
+                new_channel
             }
-        }
+        };
 
-        tracing::trace!(%local_id, %peer_id, "{context} channel");
+        tracing::trace!(
+            %local_id,
+            %peer_id,
+            ordinary_id=%DisplayHash(new_channel.ordinary_channel_in_id()),
+            prioridy_id=%DisplayHash(new_channel.priority_channel_in_id()),
+            "{context} channel"
+        );
 
         Ok(())
     }
