@@ -1,7 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-
 use anyhow::Result;
+use tokio::sync::watch;
 
 use super::decoder::*;
 use super::transfers_cache::TransferId;
@@ -15,12 +13,13 @@ pub struct IncomingTransfer {
     data: Vec<u8>,
     decoder: Option<RaptorQDecoder>,
     part: u32,
-    state: Arc<IncomingTransferState>,
-    total_size: Option<usize>,
+    state: watch::Sender<()>,
+    total_size: Option<u32>,
 }
 
 impl IncomingTransfer {
     pub fn new(transfer_id: TransferId, max_answer_size: u32) -> Self {
+        let (state, _) = watch::channel(());
         Self {
             buffer: Vec::new(),
             transfer_id,
@@ -29,17 +28,13 @@ impl IncomingTransfer {
             data: Vec::new(),
             decoder: None,
             part: 0,
-            state: Default::default(),
+            state,
             total_size: None,
         }
     }
 
-    pub fn total_size(&self) -> Option<usize> {
-        self.total_size
-    }
-
-    pub fn data(&self) -> &[u8] {
-        self.data.as_slice()
+    pub fn is_complete(&self) -> bool {
+        matches!(self.total_size, Some(total_size) if self.data.len() >= total_size as usize)
     }
 
     pub fn into_data(self) -> Vec<u8> {
@@ -51,22 +46,27 @@ impl IncomingTransfer {
     }
 
     pub fn process_chunk(&mut self, message: MessagePart) -> Result<Option<&[u8]>> {
+        anyhow::ensure!(
+            message.seqno < 16777216,
+            IncomingTransferError::InvalidSeqno
+        );
+
         // Check FEC type
         let fec_type = message.fec_type;
 
         // Initialize `total_size` on first message
         let total_size = match self.total_size {
-            Some(total_size) if total_size != message.total_size as usize => {
+            Some(total_size) if total_size as u64 != message.total_size => {
                 return Err(IncomingTransferError::TotalSizeMismatch.into())
             }
             Some(total_size) => total_size,
             None => {
-                let total_size = message.total_size as usize;
-                if total_size > self.max_answer_size as usize {
+                if message.total_size > self.max_answer_size as u64 {
                     return Err(IncomingTransferError::TooBigTransferSize.into());
                 }
+                let total_size = message.total_size as u32;
                 self.total_size = Some(total_size);
-                self.data.reserve_exact(total_size);
+                self.data = Vec::with_capacity(total_size as usize);
                 total_size
             }
         };
@@ -83,6 +83,7 @@ impl IncomingTransfer {
                     .get_or_insert_with(|| RaptorQDecoder::with_params(fec_type)),
             },
             std::cmp::Ordering::Less => {
+                //tracing::info!(part = message.part, "old complete");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
                         transfer_id: &self.transfer_id,
@@ -97,19 +98,20 @@ impl IncomingTransfer {
 
         // Decode message data
         match decoder.decode(message.seqno, message.data) {
-            Some(data) if data.len() + self.data.len() > total_size => {
+            Some(data) if data.len() + self.data.len() > total_size as usize => {
                 Err(IncomingTransferError::TooBigTransferSize.into())
             }
             Some(mut data) => {
                 self.data.append(&mut data);
 
                 // Reset decoder
-                if self.data.len() < total_size {
+                if self.data.len() < total_size as usize {
                     self.decoder = None;
                     self.part += 1;
                     self.confirm_count = 0;
                 }
 
+                //tracing::info!(part = message.part, data_len = self.data.len(), "complete");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
                         transfer_id: &self.transfer_id,
@@ -121,11 +123,13 @@ impl IncomingTransfer {
             }
             None if self.confirm_count == 9 => {
                 self.confirm_count = 0;
+
+                //tracing::info!(part = message.part, seqno = message.seqno, "confirm");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Confirm {
                         transfer_id: &self.transfer_id,
                         part: message.part,
-                        seqno: decoder.seqno(),
+                        seqno: message.seqno,
                     },
                     &mut self.buffer,
                 );
@@ -138,23 +142,8 @@ impl IncomingTransfer {
         }
     }
 
-    pub fn state(&self) -> &Arc<IncomingTransferState> {
+    pub fn state(&self) -> &watch::Sender<()> {
         &self.state
-    }
-}
-
-#[derive(Default)]
-pub struct IncomingTransferState {
-    updates: AtomicU32,
-}
-
-impl IncomingTransferState {
-    pub fn updates(&self) -> u32 {
-        self.updates.load(Ordering::Acquire)
-    }
-
-    pub fn increase_updates(&self) {
-        self.updates.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -168,6 +157,8 @@ pub struct MessagePart {
 
 #[derive(thiserror::Error, Debug)]
 enum IncomingTransferError {
+    #[error("Invalid packet seqno")]
+    InvalidSeqno,
     #[error("Total packet size mismatch")]
     TotalSizeMismatch,
     #[error("Packet parameters mismatch")]

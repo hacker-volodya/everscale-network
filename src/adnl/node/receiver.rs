@@ -583,7 +583,7 @@ impl Node {
             %local_id,
             %peer_id,
             ordinary_id=%DisplayHash(new_channel.ordinary_channel_in_id()),
-            prioridy_id=%DisplayHash(new_channel.priority_channel_in_id()),
+            priority_id=%DisplayHash(new_channel.priority_channel_in_id()),
             "{context} channel"
         );
 
