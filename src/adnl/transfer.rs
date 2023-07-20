@@ -75,7 +75,7 @@ impl Transfer {
                 tracing::debug!(
                     received,
                     total = self.total_len,
-                    transfer_id = %DisplayTransferId(transfer_id),
+                    transfer_id = %DisplayHash(transfer_id),
                     "finished ADNL transfer"
                 );
 
@@ -106,26 +106,12 @@ impl Transfer {
                 tracing::trace!(
                     received,
                     total = self.total_len,
-                    transfer_id = %DisplayTransferId(transfer_id),
+                    transfer_id = %DisplayHash(transfer_id),
                     "received ADNL transfer part"
                 );
                 Ok(None)
             }
         }
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct DisplayTransferId<'a>(pub &'a TransferId);
-
-impl std::fmt::Display for DisplayTransferId<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut output = [0u8; 64];
-        hex::encode_to_slice(self.0, &mut output).ok();
-
-        // SAFETY: output is guaranteed to contain only [0-9a-f]
-        let output = unsafe { std::str::from_utf8_unchecked(&output) };
-        f.write_str(output)
     }
 }
 

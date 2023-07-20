@@ -201,9 +201,11 @@ impl MessageSubscriber for TransfersCache {
             return Ok(false);
         }
 
-        let message_part = tl_proto::deserialize(data)?;
-        self.handle_message(ctx.adnl, ctx.local_id, ctx.peer_id, message_part)
-            .await?;
+        let message_part = tl_proto::deserialize::<proto::rldp::MessagePart<'_>>(data)?;
+        if message_part.is_valid() {
+            self.handle_message(ctx.adnl, ctx.local_id, ctx.peer_id, message_part)
+                .await?;
+        }
 
         Ok(true)
     }

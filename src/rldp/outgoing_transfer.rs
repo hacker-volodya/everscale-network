@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::watch;
 
 use super::encoder::*;
 use super::transfers_cache::TransferId;
@@ -43,7 +44,7 @@ impl OutgoingTransfer {
         }
 
         let total = self.data.len();
-        let part = self.state.part() as usize;
+        let part = *self.state.part().borrow() as usize;
         let processed = part * SLICE;
         if processed >= total {
             return Ok(None);
@@ -100,14 +101,18 @@ impl OutgoingTransfer {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.state.has_reply() && ((self.state.part() as usize + 1) * SLICE >= self.data.len())
+        self.state.has_reply() && {
+            (*self.state.part().borrow() as usize + 1) * SLICE >= self.data.len()
+        }
     }
 
     pub fn is_finished_or_next_part(&self, part: u32) -> Result<bool> {
-        if self.is_finished() {
+        let last_part = *self.state.part().borrow();
+
+        if self.state.has_reply() && (last_part as usize + 1) * SLICE >= self.data.len() {
             Ok(true)
         } else {
-            match self.state.part() {
+            match last_part {
                 x if x == part => Ok(false),
                 x if x == part + 1 => Ok(true),
                 _ => Err(OutgoingTransferError::PartMismatch.into()),
@@ -120,23 +125,28 @@ impl OutgoingTransfer {
     }
 }
 
-#[derive(Default)]
 pub struct OutgoingTransferState {
-    part: AtomicU32,
+    part: watch::Sender<u32>,
     has_reply: AtomicBool,
     seqno_out: AtomicU32,
     seqno_in: AtomicU32,
 }
 
-impl OutgoingTransferState {
-    pub fn part(&self) -> u32 {
-        self.part.load(Ordering::Acquire)
+impl Default for OutgoingTransferState {
+    fn default() -> Self {
+        let (part, _) = watch::channel(0);
+        Self {
+            part,
+            has_reply: Default::default(),
+            seqno_out: Default::default(),
+            seqno_in: Default::default(),
+        }
     }
+}
 
-    pub fn set_part(&self, part: u32) {
-        let _ = self
-            .part
-            .compare_exchange(part - 1, part, Ordering::Release, Ordering::Relaxed);
+impl OutgoingTransferState {
+    pub fn part(&self) -> &watch::Sender<u32> {
+        &self.part
     }
 
     pub fn has_reply(&self) -> bool {
@@ -164,6 +174,11 @@ impl OutgoingTransferState {
             return;
         }
         self.seqno_in.fetch_max(seqno, Ordering::Release);
+    }
+
+    pub fn reset_seqno(&self) {
+        self.seqno_in.store(0, Ordering::Release);
+        self.seqno_out.store(0, Ordering::Release);
     }
 }
 

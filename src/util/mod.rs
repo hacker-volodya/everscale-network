@@ -29,3 +29,17 @@ pub(crate) fn now() -> u32 {
         .unwrap_or_default()
         .as_secs() as u32
 }
+
+#[derive(Copy, Clone)]
+pub(crate) struct DisplayHash<'a>(pub &'a [u8; 32]);
+
+impl std::fmt::Display for DisplayHash<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut output = [0u8; 64];
+        hex::encode_to_slice(self.0, &mut output).ok();
+
+        // SAFETY: output is guaranteed to contain only [0-9a-f]
+        let output = unsafe { std::str::from_utf8_unchecked(&output) };
+        f.write_str(output)
+    }
+}

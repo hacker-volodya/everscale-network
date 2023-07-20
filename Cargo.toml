@@ -1,10 +1,10 @@
 [package]
 name = "everscale-network"
-version = "0.5.4"
+version = "0.5.5"
 description = "Implementation of the network part of the Everscale blockchain"
 repository = "https://github.com/broxus/everscale-network"
 authors = ["Ivan Kalinin <i.kalinin@dexpa.io>"]
-rust-version = "1.64.0"
+rust-version = "1.68.0"
 edition = "2021"
 include = ["src/**/*.rs", "src/**/*.tl", "README.md"]
 license = "Apache-2.0"

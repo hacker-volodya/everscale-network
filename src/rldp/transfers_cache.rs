@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use parking_lot::Mutex;
 use tl_proto::{TlRead, TlWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::compression;
 use super::incoming_transfer::*;
@@ -49,6 +48,8 @@ impl TransfersCache {
         data: Vec<u8>,
         roundtrip: Option<u64>,
     ) -> Result<(Option<Vec<u8>>, u64)> {
+        use futures_util::future::Either;
+
         // Initiate outgoing transfer with new id
         let outgoing_transfer = OutgoingTransfer::new(data, None);
         let outgoing_transfer_id = *outgoing_transfer.transfer_id();
@@ -61,7 +62,7 @@ impl TransfersCache {
         // Initiate incoming transfer with derived id
         let incoming_transfer_id = negate_id(outgoing_transfer_id);
         let incoming_transfer = IncomingTransfer::new(incoming_transfer_id, self.max_answer_size);
-        let incoming_transfer_state = incoming_transfer.state().clone();
+        let mut incoming_transfer_state = incoming_transfer.state().subscribe();
         let (parts_tx, parts_rx) = mpsc::unbounded_channel();
         self.transfers
             .insert(incoming_transfer_id, RldpTransfer::Incoming(parts_tx));
@@ -78,23 +79,19 @@ impl TransfersCache {
             adnl: adnl.clone(),
             local_id: *local_id,
             peer_id: *peer_id,
-            parts_rx,
             transfer: incoming_transfer,
             transfer_id: outgoing_transfer_id,
         };
 
         // Start query transfer loop
-        let barrier = Arc::new(Mutex::new(None));
+        let (res_tx, res_rx) = oneshot::channel();
 
         // Spawn receiver
-        tokio::spawn({
-            let barrier = barrier.clone();
-            async move {
-                incoming_context
-                    .receive(Some(outgoing_transfer_state))
-                    .await;
-                *barrier.lock() = Some(incoming_context.transfer);
-            }
+        tokio::spawn(async move {
+            incoming_context
+                .receive(Some(outgoing_transfer_state), parts_rx)
+                .await;
+            res_tx.send(incoming_context.transfer).ok();
         });
 
         // Send data and wait until something is received
@@ -106,29 +103,31 @@ impl TransfersCache {
 
         let result = match result {
             Ok((true, mut roundtrip)) => {
-                let mut start = Instant::now();
-                let mut updates = incoming_transfer_state.updates();
+                let mut res_rx = std::pin::pin!(res_rx);
                 let mut timeout = self.query_options.compute_timeout(Some(roundtrip));
 
+                let mut start = Instant::now();
                 loop {
-                    // Wait until `updates` will be the same for one interval
-                    tokio::time::sleep(Duration::from_millis(TRANSFER_LOOP_INTERVAL)).await;
+                    let updated = std::pin::pin!(tokio::time::timeout(
+                        Duration::from_millis(timeout),
+                        incoming_transfer_state.changed(),
+                    ));
 
-                    let new_updates = incoming_transfer_state.updates();
-                    if new_updates > updates {
-                        // Reset start timestamp on update
-                        timeout = self.query_options.update_roundtrip(&mut roundtrip, &start);
-                        updates = new_updates;
-                        start = Instant::now();
-                    } else if is_timed_out(&start, timeout, updates) {
-                        // Stop polling on timeout
-                        break Ok((None, roundtrip));
-                    }
-
-                    // Check barrier data
-                    if let Some(reply) = barrier.lock().take() {
-                        self.query_options.update_roundtrip(&mut roundtrip, &start);
-                        break Ok((Some(reply.into_data()), roundtrip));
+                    match futures_util::future::select(&mut res_rx, updated).await {
+                        Either::Left((reply, _)) => {
+                            break Ok((Some(reply?.into_data()), roundtrip));
+                        }
+                        Either::Right((Ok(state), _)) => {
+                            if state.is_ok() {
+                                timeout =
+                                    self.query_options.update_roundtrip(&mut roundtrip, &start);
+                                start = Instant::now();
+                            }
+                        }
+                        Either::Right((Err(_), _)) => {
+                            // Stop polling on timeout
+                            break Ok((None, roundtrip));
+                        }
                     }
                 }
             }
@@ -247,7 +246,7 @@ impl TransfersCache {
             } => {
                 if let Some(transfer) = self.transfers.get(transfer_id) {
                     if let RldpTransfer::Outgoing(state) = transfer.value() {
-                        if state.part() == part {
+                        if *state.part().borrow() == part {
                             state.set_seqno_in(seqno);
                         }
                     }
@@ -256,7 +255,15 @@ impl TransfersCache {
             proto::rldp::MessagePart::Complete { transfer_id, part } => {
                 if let Some(transfer) = self.transfers.get(transfer_id) {
                     if let RldpTransfer::Outgoing(state) = transfer.value() {
-                        state.set_part(part + 1);
+                        let changed = state.part().send_if_modified(|current_part| {
+                            let should_change = *current_part == part;
+                            *current_part += should_change as u32;
+                            should_change
+                        });
+
+                        if changed {
+                            state.reset_seqno();
+                        }
                     }
                 }
             }
@@ -292,7 +299,6 @@ impl TransfersCache {
             adnl: adnl.clone(),
             local_id: *local_id,
             peer_id: *peer_id,
-            parts_rx,
             transfer: IncomingTransfer::new(transfer_id, self.max_answer_size),
             transfer_id,
         };
@@ -304,7 +310,7 @@ impl TransfersCache {
         let force_compression = self.force_compression;
         tokio::spawn(async move {
             // Wait until incoming query is received
-            incoming_context.receive(None).await;
+            incoming_context.receive(None, parts_rx).await;
             transfers.insert(transfer_id, RldpTransfer::Done);
 
             // Process query
@@ -320,6 +326,7 @@ impl TransfersCache {
 
             // Clear transfers in background
             tokio::time::sleep(query_options.completion_interval()).await;
+
             if let Some(outgoing_transfer_id) = outgoing_transfer_id {
                 transfers.remove(&outgoing_transfer_id);
             }
@@ -349,16 +356,18 @@ struct IncomingContext {
     adnl: Arc<adnl::Node>,
     local_id: adnl::NodeIdShort,
     peer_id: adnl::NodeIdShort,
-    parts_rx: MessagePartsRx,
     transfer: IncomingTransfer,
     transfer_id: TransferId,
 }
 
 impl IncomingContext {
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn receive(&mut self, mut outgoing_transfer_state: Option<Arc<OutgoingTransferState>>) {
+    async fn receive(
+        &mut self,
+        mut outgoing_transfer_state: Option<Arc<OutgoingTransferState>>,
+        mut rx: MessagePartsRx,
+    ) {
         // For each incoming message part
-        while let Some(message) = self.parts_rx.recv().await {
+        while let Some(message) = rx.recv().await {
             // Trying to process its data
             match self.transfer.process_chunk(message) {
                 // If some data was successfully processed
@@ -375,29 +384,19 @@ impl IncomingContext {
                 _ => {}
             }
 
-            // Increase `updates` counter
-            self.transfer.state().increase_updates();
-
             // Notify state, that some reply was received
             if let Some(outgoing_transfer_state) = outgoing_transfer_state.take() {
                 outgoing_transfer_state.set_reply();
             }
 
+            // Increase `updates` counter
+            self.transfer.state().send(()).ok();
+
             // Exit loop if all bytes were received
-            match self.transfer.total_size() {
-                Some(total_size) if self.transfer.data().len() >= total_size => {
-                    break;
-                }
-                None => {
-                    tracing::warn!("total size mismatch");
-                }
-                _ => {}
+            if self.transfer.is_complete() {
+                break;
             }
         }
-
-        // Close and clear parts channel
-        self.parts_rx.close();
-        while self.parts_rx.recv().await.is_some() {}
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -472,11 +471,13 @@ impl OutgoingContext {
 
         let waves_interval = Duration::from_millis(query_options.query_wave_interval_ms);
 
+        let mut completed_part = self.transfer.state().part().subscribe();
+
         // For each outgoing message part
         while let Some(packet_count) = ok!(self.transfer.start_next_part()) {
             let wave_len = std::cmp::min(packet_count, query_options.query_wave_len);
 
-            let part = self.transfer.state().part();
+            let part = *self.transfer.state().part().borrow();
 
             let mut start = Instant::now();
 
@@ -489,14 +490,13 @@ impl OutgoingContext {
                         &self.peer_id,
                         ok!(self.transfer.prepare_chunk()),
                     ));
-
-                    if ok!(self.transfer.is_finished_or_next_part(part)) {
-                        break 'part;
-                    }
                 }
 
-                tokio::time::sleep(waves_interval).await;
-                if ok!(self.transfer.is_finished_or_next_part(part)) {
+                if tokio::time::timeout(waves_interval, completed_part.changed())
+                    .await
+                    .is_ok()
+                    && self.transfer.is_finished_or_next_part(part)?
+                {
                     break 'part;
                 }
 
@@ -644,6 +644,17 @@ impl OwnedRldpMessageQuery {
     }
 }
 
+impl proto::rldp::MessagePart<'_> {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::MessagePart { seqno, .. } | Self::Confirm { seqno, .. } => {
+                seqno & 0xff000000 == 0
+            }
+            _ => true,
+        }
+    }
+}
+
 fn is_timed_out(time: &Instant, timeout: u64, updates: u32) -> bool {
     time.elapsed().as_millis() as u64 > timeout + timeout * (updates as u64) / 100
 }
@@ -656,8 +667,6 @@ type MessagePartsTx = mpsc::UnboundedSender<MessagePart>;
 type MessagePartsRx = mpsc::UnboundedReceiver<MessagePart>;
 
 pub type TransferId = [u8; 32];
-
-const TRANSFER_LOOP_INTERVAL: u64 = 10; // Milliseconds
 
 #[derive(thiserror::Error, Debug)]
 enum TransfersCacheError {
