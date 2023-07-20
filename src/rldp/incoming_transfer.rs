@@ -83,7 +83,6 @@ impl IncomingTransfer {
                     .get_or_insert_with(|| RaptorQDecoder::with_params(fec_type)),
             },
             std::cmp::Ordering::Less => {
-                //tracing::info!(part = message.part, "old complete");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
                         transfer_id: &self.transfer_id,
@@ -111,7 +110,6 @@ impl IncomingTransfer {
                     self.confirm_count = 0;
                 }
 
-                //tracing::info!(part = message.part, data_len = self.data.len(), "complete");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
                         transfer_id: &self.transfer_id,
@@ -124,7 +122,6 @@ impl IncomingTransfer {
             None if self.confirm_count == 9 => {
                 self.confirm_count = 0;
 
-                //tracing::info!(part = message.part, seqno = message.seqno, "confirm");
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Confirm {
                         transfer_id: &self.transfer_id,

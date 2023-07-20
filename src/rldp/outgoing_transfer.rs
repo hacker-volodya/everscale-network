@@ -86,13 +86,6 @@ impl OutgoingTransfer {
             self.state.set_seqno_out(next_seqno_out);
         }
 
-        // tracing::info!(
-        //     part = self.current_message_part,
-        //     seqno_in,
-        //     seqno_out,
-        //     next_seqno_out
-        // );
-
         tl_proto::serialize_into(
             proto::rldp::MessagePart::MessagePart {
                 transfer_id: &self.transfer_id,

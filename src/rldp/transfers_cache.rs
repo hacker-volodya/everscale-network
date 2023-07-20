@@ -311,11 +311,6 @@ impl TransfersCache {
             incoming_context.receive(None, parts_rx).await;
             transfers.insert(transfer_id, RldpTransfer::Done);
 
-            static QUERY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-            let idx = QUERY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(query = idx, "received query");
-
             // Process query
             let outgoing_transfer_id = incoming_context
                 .answer(
@@ -327,12 +322,9 @@ impl TransfersCache {
                 .await
                 .unwrap_or_default();
 
-            tracing::info!(query = idx, "answer");
-
             // Clear transfers in background
             tokio::time::sleep(query_options.completion_interval()).await;
 
-            tracing::info!(query = idx, "removing");
             if let Some(outgoing_transfer_id) = outgoing_transfer_id {
                 transfers.remove(&outgoing_transfer_id);
             }
@@ -374,14 +366,6 @@ impl IncomingContext {
     ) {
         // For each incoming message part
         while let Some(message) = rx.recv().await {
-            // tracing::info!(
-            //     part = message.part,
-            //     total_size = message.total_size,
-            //     seqno = message.seqno,
-            //     data_len = message.data.len(),
-            //     "received message"
-            // );
-
             // Trying to process its data
             match self.transfer.process_chunk(message) {
                 // If some data was successfully processed
@@ -516,7 +500,6 @@ impl OutgoingContext {
 
                 // Update timeout on incoming packets
                 let new_incoming_seqno = self.transfer.state().seqno_in();
-                //tracing::info!(new_incoming_seqno, incoming_seqno);
                 if new_incoming_seqno > incoming_seqno {
                     timeout = query_options.update_roundtrip(&mut roundtrip, &start);
                     incoming_seqno = new_incoming_seqno;
