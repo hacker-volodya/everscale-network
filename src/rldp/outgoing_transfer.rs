@@ -45,19 +45,27 @@ impl OutgoingTransfer {
 
         let total = self.data.len();
         let part = *self.state.part().borrow() as usize;
-        let processed = part * SLICE;
+        let processed = part * RaptorQEncoder::SLICE;
         if processed >= total {
             return Ok(None);
         }
 
         self.current_message_part = part as u32;
 
-        let chunk_size = std::cmp::min(total - processed, SLICE);
-        let encoder = self.encoder.insert(RaptorQEncoder::with_data(
-            &self.data[processed..processed + chunk_size],
-        ));
+        let chunk_size = std::cmp::min(total - processed, RaptorQEncoder::SLICE);
+        let data = &self.data[processed..processed + chunk_size];
 
-        let packet_count = encoder.params().packet_count;
+        let packet_count = match &mut self.encoder {
+            Some(encoder) => {
+                encoder.reset(data);
+                encoder.params().packet_count
+            }
+            None => {
+                let encoder = self.encoder.insert(RaptorQEncoder::with_data(data));
+                encoder.params().packet_count
+            }
+        };
+
         Ok(if packet_count > 0 {
             Some(packet_count)
         } else {
@@ -74,7 +82,7 @@ impl OutgoingTransfer {
         let mut seqno_out = self.state.seqno_out();
         let previous_seqno_out = seqno_out;
 
-        let data = ok!(encoder.encode(&mut seqno_out));
+        let data = encoder.encode(&mut seqno_out);
 
         let seqno_in = self.state.seqno_in();
 
@@ -102,14 +110,16 @@ impl OutgoingTransfer {
 
     pub fn is_finished(&self) -> bool {
         self.state.has_reply() && {
-            (*self.state.part().borrow() as usize + 1) * SLICE >= self.data.len()
+            (*self.state.part().borrow() as usize + 1) * RaptorQEncoder::SLICE >= self.data.len()
         }
     }
 
     pub fn is_finished_or_next_part(&self, part: u32) -> Result<bool> {
         let last_part = *self.state.part().borrow();
 
-        if self.state.has_reply() && (last_part as usize + 1) * SLICE >= self.data.len() {
+        if self.state.has_reply()
+            && (last_part as usize + 1) * RaptorQEncoder::SLICE >= self.data.len()
+        {
             Ok(true)
         } else {
             match last_part {
@@ -183,7 +193,6 @@ impl OutgoingTransferState {
 }
 
 const WINDOW: u32 = 1000;
-const SLICE: usize = 2000000;
 
 #[derive(thiserror::Error, Debug)]
 enum OutgoingTransferError {
