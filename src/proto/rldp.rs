@@ -5,12 +5,6 @@ use super::HashRef;
 #[derive(Debug, Copy, Clone, TlRead, TlWrite)]
 #[tl(boxed, scheme = "scheme.tl")]
 pub enum Message<'tl> {
-    #[tl(id = "rldp.message")]
-    Message {
-        #[tl(size_hint = 32)]
-        id: HashRef<'tl>,
-        data: &'tl [u8],
-    },
     #[tl(id = "rldp.answer")]
     Answer {
         #[tl(size_hint = 32)]

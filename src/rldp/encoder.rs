@@ -4,6 +4,11 @@ use everscale_raptorq::{
 
 use crate::proto::rldp::RaptorQFecType;
 
+pub struct RaptorQEncoderConstraints {
+    pub max_data_size: usize,
+    pub packet_len: u32,
+}
+
 pub struct RaptorQEncoder {
     params: RaptorQFecType,
     encoder: SourceBlockEncoder,
@@ -13,6 +18,15 @@ pub struct RaptorQEncoder {
 impl RaptorQEncoder {
     pub const SLICE: usize = 2000000;
     pub const MAX_TRANSMISSION_UNIT: u32 = 768;
+
+    pub fn check_fec_type(
+        fec_type: &RaptorQFecType,
+        constraints: RaptorQEncoderConstraints,
+    ) -> bool {
+        fec_type.packet_len == constraints.packet_len
+            && fec_type.total_len > 0
+            && fec_type.total_len as usize <= constraints.max_data_size
+    }
 
     pub fn with_data(data: &[u8]) -> Self {
         let mut cached_plan = None;
@@ -90,7 +104,7 @@ fn make_encoder(data: &[u8], plan: &mut Option<SourceBlockEncodingPlan>) -> Sour
             data
         };
 
-        SourceBlockEncoder::with_encoding_plan2(0, &config, data, &plan)
+        SourceBlockEncoder::with_encoding_plan2(0, &config, data, plan)
     };
 
     if unaligned_data_len < RaptorQEncoder::SLICE {
@@ -100,7 +114,7 @@ fn make_encoder(data: &[u8], plan: &mut Option<SourceBlockEncodingPlan>) -> Sour
     encoder
 }
 
-pub const fn int_div_ceil(num: u64, denom: u64) -> u32 {
+const fn int_div_ceil(num: u64, denom: u64) -> u32 {
     if num % denom == 0 {
         (num / denom) as u32
     } else {

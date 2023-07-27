@@ -1,11 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-use super::compression;
-use super::transfers_cache::*;
+use super::transfers_handler::*;
+use super::{compression, RaptorQEncoder, RaptorQEncoderConstraints};
 use crate::adnl;
 use crate::proto;
 use crate::subscriber::*;
@@ -73,7 +74,7 @@ pub struct Node {
     /// Parallel requests limiter
     semaphores: FastDashMap<adnl::NodeIdShort, Arc<Semaphore>>,
     /// Transfers handler
-    transfers: Arc<TransfersCache>,
+    transfers: Arc<TransfersHandler>,
     /// Configuration
     options: NodeOptions,
 }
@@ -85,16 +86,32 @@ impl Node {
         subscribers: Vec<Arc<dyn QuerySubscriber>>,
         options: NodeOptions,
     ) -> Result<Arc<Self>> {
-        let transfers = Arc::new(TransfersCache::new(subscribers, options));
+        let transfers = Arc::new(TransfersHandler::new(subscribers, options));
 
         adnl.add_message_subscriber(transfers.clone())?;
 
-        Ok(Arc::new(Self {
+        let node = Arc::new(Self {
             adnl,
             semaphores: Default::default(),
             transfers,
             options,
-        }))
+        });
+
+        tokio::spawn({
+            let node = Arc::downgrade(&node);
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    match node.upgrade() {
+                        Some(node) => node.gc(),
+                        None => return,
+                    }
+                }
+            }
+        });
+
+        Ok(node)
     }
 
     /// Underlying ADNL node
@@ -111,15 +128,8 @@ impl Node {
     pub fn metrics(&self) -> NodeMetrics {
         NodeMetrics {
             peer_count: self.semaphores.len(),
-            transfers_cache_len: self.transfers.len(),
+            transfers_cache_len: 0, // TODO
         }
-    }
-
-    /// Clears semaphores table
-    pub fn gc(&self) {
-        let max_permits = self.options.max_peer_queries;
-        self.semaphores
-            .retain(|_, semaphore| semaphore.available_permits() < max_permits);
     }
 
     #[tracing::instrument(level = "debug", name = "rldp_query", skip_all, fields(%local_id, %peer_id, ?roundtrip))]
@@ -156,9 +166,6 @@ impl Node {
                     roundtrip,
                 )),
                 Ok(proto::rldp::Message::Answer { .. }) => Err(NodeError::QueryIdMismatch.into()),
-                Ok(proto::rldp::Message::Message { .. }) => {
-                    Err(NodeError::UnexpectedAnswer("RldpMessageView::Message").into())
-                }
                 Ok(proto::rldp::Message::Query { .. }) => {
                     Err(NodeError::UnexpectedAnswer("RldpMessageView::Query").into())
                 }
@@ -184,10 +191,19 @@ impl Node {
         };
         (query_id, tl_proto::serialize(data))
     }
+
+    /// Clears semaphores table
+    fn gc(&self) {
+        let max_permits = self.options.max_peer_queries;
+        self.semaphores
+            .retain(|_, semaphore| semaphore.available_permits() < max_permits);
+
+        self.transfers.gc();
+    }
 }
 
 #[async_trait::async_trait]
-impl MessageSubscriber for TransfersCache {
+impl MessageSubscriber for TransfersHandler {
     async fn try_consume_custom<'a>(
         &self,
         ctx: SubscriberContext<'a>,
@@ -208,6 +224,31 @@ impl MessageSubscriber for TransfersCache {
         }
 
         Ok(true)
+    }
+}
+
+impl proto::rldp::MessagePart<'_> {
+    fn is_valid(&self) -> bool {
+        const CONSTRAINTS: RaptorQEncoderConstraints = RaptorQEncoderConstraints {
+            max_data_size: RaptorQEncoder::SLICE,
+            packet_len: RaptorQEncoder::MAX_TRANSMISSION_UNIT,
+        };
+
+        let seqno = match self {
+            Self::MessagePart {
+                seqno, fec_type, ..
+            } => {
+                if !RaptorQEncoder::check_fec_type(fec_type, CONSTRAINTS) {
+                    return false;
+                }
+
+                *seqno
+            }
+            Self::Confirm { seqno, .. } => *seqno,
+            Self::Complete { .. } => return true,
+        };
+
+        (seqno & 0xff000000) == 0
     }
 }
 

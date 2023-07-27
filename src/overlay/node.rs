@@ -149,6 +149,10 @@ impl MessageSubscriber for NodeState {
         let overlay_id = IdShort::from(<[u8; 32]>::read_from(data, &mut offset)?);
         let broadcast = proto::overlay::Broadcast::read_from(data, &mut offset)?;
 
+        if !broadcast.is_valid() {
+            return Ok(true);
+        }
+
         // TODO: check that offset == data.len()
 
         let overlay = self.get_overlay(&overlay_id)?;
@@ -206,6 +210,31 @@ impl QuerySubscriber for NodeState {
             QueryConsumingResult::Consumed(result) => Ok(QueryConsumingResult::Consumed(result)),
             QueryConsumingResult::Rejected(_) => Err(NodeError::UnsupportedQuery.into()),
         }
+    }
+}
+
+impl proto::overlay::Broadcast<'_> {
+    fn is_valid(&self) -> bool {
+        use crate::rldp::{RaptorQEncoder, RaptorQEncoderConstraints};
+
+        const CONSTRAINTS: RaptorQEncoderConstraints = RaptorQEncoderConstraints {
+            // NOTE: 32 MB is the max reasonable data size due to the default decoder block count assumption
+            max_data_size: 32 << 20,
+            packet_len: RaptorQEncoder::MAX_TRANSMISSION_UNIT,
+        };
+
+        let seqno = match self {
+            Self::BroadcastFec(broadcast) => {
+                if !RaptorQEncoder::check_fec_type(&broadcast.fec, CONSTRAINTS) {
+                    return false;
+                }
+
+                broadcast.seqno
+            }
+            _ => return true,
+        };
+
+        (seqno & 0xff000000) == 0
     }
 }
 
