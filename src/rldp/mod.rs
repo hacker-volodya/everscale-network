@@ -13,7 +13,7 @@ use frunk_core::hlist::{HCons, HList, IntoTuple2, Selector};
 use frunk_core::indices::{Here, There};
 
 pub(crate) use decoder::RaptorQDecoder;
-pub(crate) use encoder::RaptorQEncoder;
+pub(crate) use encoder::{RaptorQEncoder, RaptorQEncoderConstraints};
 pub use node::{Node, NodeMetrics, NodeOptions};
 
 use crate::adnl;
@@ -23,10 +23,8 @@ use crate::util::{DeferredInitialization, NetworkBuilder};
 pub(crate) mod compression;
 mod decoder;
 mod encoder;
-mod incoming_transfer;
 mod node;
-mod outgoing_transfer;
-mod transfers_cache;
+mod transfers_handler;
 
 pub(crate) type Deferred = Result<(Arc<adnl::Node>, Vec<Arc<dyn QuerySubscriber>>, NodeOptions)>;
 

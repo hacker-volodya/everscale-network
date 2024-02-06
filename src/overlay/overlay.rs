@@ -1072,7 +1072,7 @@ impl Overlay {
         transfer: &mut OutgoingFecTransfer,
         key: &Arc<adnl::Key>,
     ) -> Result<Vec<u8>> {
-        let chunk = transfer.encoder.encode(&mut transfer.seqno)?;
+        let chunk = transfer.encoder.encode(&mut transfer.seqno);
         let date = now();
 
         let broadcast_to_sign = &make_fec_part_to_sign(

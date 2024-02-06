@@ -1,66 +1,108 @@
+use std::num::NonZeroU32;
+use std::time::Instant;
+
 use anyhow::Result;
-use tokio::sync::watch;
+use tokio::sync::mpsc;
 
-use super::decoder::*;
-use super::transfers_cache::TransferId;
+use super::{OutgoingTransferState, TransferId};
+use crate::adnl;
 use crate::proto;
+use crate::rldp::decoder::RaptorQDecoder;
+use crate::rldp::NodeOptions;
 
-pub struct IncomingTransfer {
+pub struct IncomingTransfer<'a> {
+    transfer_id: &'a TransferId,
+    options: &'a NodeOptions,
     buffer: Vec<u8>,
-    transfer_id: TransferId,
-    max_answer_size: u32,
-    confirm_count: usize,
+    confirm_count: u32,
     data: Vec<u8>,
     decoder: Option<RaptorQDecoder>,
     part: u32,
-    state: watch::Sender<()>,
-    total_size: Option<u32>,
+    total_size: Option<NonZeroU32>,
 }
 
-impl IncomingTransfer {
-    pub fn new(transfer_id: TransferId, max_answer_size: u32) -> Self {
-        let (state, _) = watch::channel(());
+impl<'a> IncomingTransfer<'a> {
+    pub fn new(transfer_id: &'a TransferId, options: &'a NodeOptions) -> Self {
         Self {
-            buffer: Vec::new(),
             transfer_id,
-            max_answer_size,
+            options,
+            buffer: Vec::new(),
             confirm_count: 0,
             data: Vec::new(),
             decoder: None,
             part: 0,
-            state,
             total_size: None,
         }
     }
 
-    pub fn is_complete(&self) -> bool {
-        matches!(self.total_size, Some(total_size) if self.data.len() >= total_size as usize)
+    pub async fn receive(
+        mut self,
+        adnl: &adnl::Node,
+        local_id: &adnl::NodeIdShort,
+        peer_id: &adnl::NodeIdShort,
+        mut rx: MessagePartsRx,
+        mut outgoing_transfer_state: Option<&OutgoingTransferState>,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut timeout = self.options.compute_timeout(None);
+        let mut roundtrip = 0;
+
+        // For each incoming message part
+        loop {
+            let start = Instant::now();
+            let message = match tokio::time::timeout(timeout, rx.recv()).await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(_) => return Ok(None),
+            };
+
+            timeout = self.options.update_roundtrip(&start, &mut roundtrip);
+
+            // Try to process its data
+            if let Some(reply) = self.process_chunk(message)? {
+                // If some data was successfully processed
+                // Send `complete` or `confirm` message as reply
+                adnl.send_custom_message(local_id, peer_id, reply)?;
+            }
+
+            // Notify state, that some reply was received
+            if let Some(outgoing_transfer_state) = outgoing_transfer_state.take() {
+                outgoing_transfer_state.set_has_reply();
+            }
+
+            // Exit loop if all bytes were received
+            if let Some(total_size) = self.total_size {
+                if self.data.len() >= total_size.get() as usize {
+                    return Ok(Some(self.data));
+                }
+            }
+        }
+
+        Err(IncomingTransferError::ReceiverCancelled.into())
     }
 
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
-    }
-
-    pub fn take_data(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.data)
-    }
-
-    pub fn process_chunk(&mut self, message: MessagePart) -> Result<Option<&[u8]>> {
+    fn process_chunk(&mut self, message: MessagePart) -> Result<Option<&[u8]>> {
         // Check FEC type
         let fec_type = message.fec_type;
 
         // Initialize `total_size` on first message
         let total_size = match self.total_size {
-            Some(total_size) if total_size as u64 != message.total_size => {
-                return Err(IncomingTransferError::TotalSizeMismatch.into())
+            Some(total_size) => {
+                let total_size = total_size.get();
+                if message.total_size != total_size as u64 {
+                    return Err(IncomingTransferError::TotalSizeMismatch.into());
+                }
+
+                total_size
             }
-            Some(total_size) => total_size,
             None => {
-                if message.total_size > self.max_answer_size as u64 {
+                if message.total_size > self.options.max_answer_size as u64 {
                     return Err(IncomingTransferError::TooBigTransferSize.into());
                 }
-                let total_size = message.total_size as u32;
-                self.total_size = Some(total_size);
+
+                let total_size = match NonZeroU32::new(message.total_size as u32) {
+                    Some(total_size) => self.total_size.insert(total_size).get(),
+                    None => return Err(IncomingTransferError::TooSmallTransferSize.into()),
+                };
                 self.data = Vec::with_capacity(total_size as usize);
                 total_size
             }
@@ -80,7 +122,7 @@ impl IncomingTransfer {
             std::cmp::Ordering::Less => {
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
-                        transfer_id: &self.transfer_id,
+                        transfer_id: self.transfer_id,
                         part: message.part,
                     },
                     &mut self.buffer,
@@ -107,7 +149,7 @@ impl IncomingTransfer {
 
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Complete {
-                        transfer_id: &self.transfer_id,
+                        transfer_id: self.transfer_id,
                         part: message.part,
                     },
                     &mut self.buffer,
@@ -119,7 +161,7 @@ impl IncomingTransfer {
 
                 tl_proto::serialize_into(
                     proto::rldp::MessagePart::Confirm {
-                        transfer_id: &self.transfer_id,
+                        transfer_id: self.transfer_id,
                         part: message.part,
                         seqno: message.seqno,
                     },
@@ -133,11 +175,9 @@ impl IncomingTransfer {
             }
         }
     }
-
-    pub fn state(&self) -> &watch::Sender<()> {
-        &self.state
-    }
 }
+
+pub type MessagePartsRx = mpsc::UnboundedReceiver<MessagePart>;
 
 pub struct MessagePart {
     pub fec_type: proto::rldp::RaptorQFecType,
@@ -155,4 +195,8 @@ enum IncomingTransferError {
     PacketParametersMismatch,
     #[error("Too big size for RLDP transfer")]
     TooBigTransferSize,
+    #[error("Too small size for RLDP transfer")]
+    TooSmallTransferSize,
+    #[error("Receiver cancelled")]
+    ReceiverCancelled,
 }

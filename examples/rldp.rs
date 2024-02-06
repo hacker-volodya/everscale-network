@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     let iterations = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
 
-    for _ in 0..200 {
+    for _ in 0..100 {
         let left_rldp = left_rldp.clone();
         let query = example_request();
         let iterations = iterations.clone();
