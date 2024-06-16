@@ -395,6 +395,7 @@ impl Overlay {
     /// Sends RLDP query directly to the given peer. In case of timeout returns `Ok((None, max_timeout))`
     ///
     /// NOTE: Local id ([`Overlay::overlay_key`]) will be used as sender
+    #[tracing::instrument(level = "debug", skip(self, rldp, query), err)]
     pub async fn rldp_query<Q>(
         &self,
         rldp: &rldp::Node,

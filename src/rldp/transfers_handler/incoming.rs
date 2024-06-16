@@ -35,6 +35,7 @@ impl<'a> IncomingTransfer<'a> {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip(self, adnl, rx, outgoing_transfer_state), err)]
     pub async fn receive(
         mut self,
         adnl: &adnl::Node,
@@ -49,6 +50,7 @@ impl<'a> IncomingTransfer<'a> {
         // For each incoming message part
         loop {
             let start = Instant::now();
+            tracing::trace!(?timeout, "waiting for answer");
             let message = match tokio::time::timeout(timeout, rx.recv()).await {
                 Ok(Some(message)) => message,
                 Ok(None) => break,

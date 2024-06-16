@@ -18,6 +18,7 @@ impl RaptorQDecoder {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     pub fn decode(&mut self, seqno: u32, data: Vec<u8>) -> Option<Vec<u8>> {
         let packet = EncodingPacket::new(PayloadId::new(0, seqno), data);
         self.engine.decode(packet)

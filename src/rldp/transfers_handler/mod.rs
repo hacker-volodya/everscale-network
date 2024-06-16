@@ -42,6 +42,7 @@ impl TransfersHandler {
     }
 
     /// Sends serialized query and waits answer
+    #[tracing::instrument(level = "debug", skip(self, adnl, data), err)]
     pub async fn query(
         &self,
         adnl: &Arc<adnl::Node>,
@@ -110,6 +111,7 @@ impl TransfersHandler {
     }
 
     /// Handles incoming message
+    #[tracing::instrument(level = "debug", skip(self, adnl), err)]
     pub async fn handle_message(
         &self,
         adnl: &Arc<adnl::Node>,
@@ -214,6 +216,7 @@ impl TransfersHandler {
     }
 
     /// Receives incoming query and sends answer
+    #[tracing::instrument(level = "debug", skip(self, adnl), err)]
     async fn handle_answer(
         &self,
         adnl: &Arc<adnl::Node>,

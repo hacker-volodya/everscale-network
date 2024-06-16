@@ -105,6 +105,7 @@ impl Node {
     }
 
     /// Decrypts and processes received data
+    #[tracing::instrument(level = "debug", skip(self, data, message_subscribers, query_subscribers), err)]
     async fn handle_received_data(
         self: &Arc<Self>,
         mut data: PacketView<'_>,
